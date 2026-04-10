@@ -1,0 +1,11 @@
+**/.git
+**/.gitignore
+**/.vscode
+**/.env
+Dockerfile
+README.md
+docker-compose.yml
+**/.DS_Store
+**/.venv
+**/venv
+**/env
