@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import os
 import queue
@@ -89,6 +90,18 @@ def _time_to_seconds(t):
         return 0
 
 
+def _seconds_until_start(data):
+    start_time = data.get("startTimeUTC")
+    if not start_time:
+        return None
+    try:
+        start_dt = datetime.datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return int((start_dt - now).total_seconds())
+
+
 def _get_last_event(summary):
     events = []
     for period_block in summary.get("scoring", []):
@@ -145,6 +158,15 @@ def _build_view(payload: dict) -> dict:
     period_desc = data.get("periodDescriptor", {})
     period_label = _format_period(period_desc)
     clock = data.get("clock", {})
+    seconds_until_start = _seconds_until_start(data)
+
+    if seconds_until_start is not None and seconds_until_start > 15 * 60:
+        return {
+            "type": "update",
+            "show_countdown": True,
+            "countdown_seconds": seconds_until_start,
+            "header": f"{away_abbrev} @ {home_abbrev}",
+        }
 
     in_intermission = clock.get("inIntermission", False)
     clock_running = clock.get("running", False)
@@ -178,6 +200,7 @@ def _build_view(payload: dict) -> dict:
 
     return {
         "type": "update",
+        "show_countdown": False,
         "away_abbrev": away_abbrev,
         "home_abbrev": home_abbrev,
         "away_name": away.get("commonName", {}).get("default", away_abbrev),
@@ -236,6 +259,32 @@ HTML = """<!doctype html>
 
   /* scoreboard */
   #scoreboard { display: none; }
+
+  /* pregame countdown */
+  #countdown-view {
+    display: none;
+    text-align: center;
+    padding: 40px 0;
+  }
+  #countdown-header {
+    font-size: 1.25rem;
+    font-weight: bold;
+    color: #FFD700;
+    margin-bottom: 10px;
+    letter-spacing: 0.04em;
+  }
+  #countdown-label {
+    font-size: 1rem;
+    color: #bbb;
+    margin-bottom: 8px;
+  }
+  #countdown-timer {
+    font-size: 3.25rem;
+    font-weight: bold;
+    line-height: 1.1;
+    color: #ffffff;
+    font-variant-numeric: tabular-nums;
+  }
 
   #header {
     text-align: center;
@@ -317,6 +366,12 @@ HTML = """<!doctype html>
 <div id="board">
   <div id="status">Connecting&hellip;</div>
 
+  <div id="countdown-view">
+    <div id="countdown-header"></div>
+    <div id="countdown-label">Puck drop in</div>
+    <div id="countdown-timer">00:00:00</div>
+  </div>
+
   <div id="scoreboard">
     <div id="header"></div>
 
@@ -353,13 +408,20 @@ HTML = """<!doctype html>
 <script>
 const status = document.getElementById('status');
 const scoreboard = document.getElementById('scoreboard');
+const countdownView = document.getElementById('countdown-view');
 
 function show(view) {
   if (view === 'status') {
+    countdownView.style.display = 'none';
     scoreboard.style.display = 'none';
     status.style.display = '';
+  } else if (view === 'countdown') {
+    scoreboard.style.display = 'none';
+    status.style.display = 'none';
+    countdownView.style.display = 'block';
   } else {
     status.style.display = 'none';
+    countdownView.style.display = 'none';
     scoreboard.style.display = 'block';
   }
 }
@@ -371,6 +433,8 @@ function set(id, html) {
 let countdownInterval = null;
 let secondsRemaining = 0;
 let periodPrefix = '';
+let pregameCountdownInterval = null;
+let pregameSecondsRemaining = 0;
 
 function renderClock() {
   const m = Math.floor(secondsRemaining / 60);
@@ -378,10 +442,45 @@ function renderClock() {
   set('clock', `${periodPrefix} &bull; ${m}:${s.toString().padStart(2, '0')} remaining`);
 }
 
+function stopPregameCountdown() {
+  clearInterval(pregameCountdownInterval);
+  pregameCountdownInterval = null;
+}
+
+function renderPregameCountdown() {
+  const total = Math.max(0, pregameSecondsRemaining);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  set('countdown-timer', `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+}
+
 const es = new EventSource('/events');
 
 es.addEventListener('update', e => {
   const d = JSON.parse(e.data);
+
+  if (d.show_countdown) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+
+    set('countdown-header', d.header || 'Upcoming Game');
+    pregameSecondsRemaining = Math.max(0, Number(d.countdown_seconds || 0));
+    renderPregameCountdown();
+
+    if (pregameCountdownInterval === null) {
+      pregameCountdownInterval = setInterval(() => {
+        pregameSecondsRemaining = Math.max(0, pregameSecondsRemaining - 1);
+        renderPregameCountdown();
+      }, 1000);
+    }
+
+    show('countdown');
+    return;
+  }
+
+  stopPregameCountdown();
+
   set('header', d.header);
   set('away-name', d.away_name);
   set('home-name', d.home_name);
@@ -418,18 +517,21 @@ es.addEventListener('update', e => {
 });
 
 es.addEventListener('error_payload', e => {
+  stopPregameCountdown();
   status.classList.add('error');
   set('status', 'No Game Available');
   show('status');
 });
 
 es.addEventListener('connecting', e => {
+  stopPregameCountdown();
   status.classList.remove('error');
   set('status', JSON.parse(e.data).message);
   show('status');
 });
 
 es.onerror = () => {
+  stopPregameCountdown();
   status.classList.remove('error');
   set('status', 'Reconnecting&hellip;');
   show('status');
