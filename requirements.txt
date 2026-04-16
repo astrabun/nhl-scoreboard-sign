@@ -2,3 +2,4 @@ websockets
 python-dotenv
 flask
 gunicorn
+aiohttp

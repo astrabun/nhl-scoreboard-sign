@@ -17,3 +17,13 @@ services:
     depends_on:
       - nhl-scores-ws
     restart: unless-stopped
+
+  nhl-bracket:
+    build:
+      context: .
+      dockerfile: Dockerfile.bracket
+    ports:
+      - "${BRACKET_PORT:-8090}:8090"
+    environment:
+      - BRACKET_PORT=8090
+    restart: unless-stopped
